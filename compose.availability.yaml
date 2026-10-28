@@ -1,0 +1,48 @@
+name: seerr-availability-lab
+services:
+  seerr:
+    build:
+      context: .
+      dockerfile: Dockerfile.availability
+    image: seerr-availability:local
+    container_name: seerr-availability-lab
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:5057:5055'
+      - '192.168.0.21:5057:5055'
+    environment:
+      NODE_ENV: production
+      AVAILABILITY_SANDBOX: 'true'
+      AVAILABILITY_INTERVAL_MS: '600000'
+      AVAILABILITY_HOURLY_LIMIT: '6'
+      AVAILABILITY_AUTO_CHECK: 'false'
+      PROWLARR_URL: http://seerr-availability-indexers:9696
+    volumes:
+      - lab-config:/app/config
+    networks:
+      - umbrel
+  indexers:
+    image: linuxserver/prowlarr:version-2.6.5.5623@sha256:c96b56d94d116a9f4de94bc23d3381689492e6c3cfb7435320e8d982e406f99a
+    container_name: seerr-availability-indexers
+    restart: unless-stopped
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - lab-indexers:/config
+    networks:
+      - umbrel
+volumes:
+  lab-config:
+    external: true
+    name: seerr-availability-lab-config
+  lab-indexers:
+    external: true
+    name: seerr-availability-lab-indexers
+networks:
+  umbrel:
+    external: true
+    name: umbrel_main_network

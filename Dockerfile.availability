@@ -1,0 +1,13 @@
+FROM ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be AS build
+USER root
+RUN npm install --prefix /tooling --ignore-scripts --no-audit --no-fund typescript@5.4.5
+COPY server/index.ts /source/server/index.ts
+COPY server/lib/releaseAvailability.ts /source/server/lib/releaseAvailability.ts
+COPY bin/build-availability.cjs /source/build.cjs
+RUN node /source/build.cjs
+
+FROM ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+COPY --from=build --chown=node:node /app/dist/index.js /app/dist/index.js
+COPY --from=build --chown=node:node /app/dist/lib/releaseAvailability.js /app/dist/lib/releaseAvailability.js
+COPY --chown=node:node public/availability-lab.html /app/public/availability-lab.html
+ENV AVAILABILITY_SANDBOX=true

@@ -19,6 +19,9 @@ import WebhookAgent from '@server/lib/notifications/agents/webhook';
 import WebPushAgent from '@server/lib/notifications/agents/webpush';
 import checkOverseerrMerge from '@server/lib/overseerrMerge';
 import { getSettings } from '@server/lib/settings';
+import { Permission } from '@server/lib/permissions';
+import { availabilityMiddleware, availabilityRouter } from '@server/lib/releaseAvailability';
+import { checkUser, isAuthenticated } from '@server/middleware/auth';
 import logger from '@server/logger';
 import clearCookies from '@server/middleware/clearcookies';
 import routes from '@server/routes';
@@ -153,7 +156,7 @@ app
 
     const userRepository = getRepository(User);
     const totalUsers = await userRepository.count();
-    if (totalUsers > 0) {
+    if (totalUsers > 0 && process.env.AVAILABILITY_SANDBOX !== 'true') {
       startJobs();
     } else {
       logger.info(
@@ -233,6 +236,10 @@ app
         }).connect(sessionRespository) as Store,
       })
     );
+    if (process.env.AVAILABILITY_SANDBOX === 'true') {
+      server.use('/api/v1/availability', checkUser, isAuthenticated(Permission.ADMIN), availabilityRouter);
+      server.use(availabilityMiddleware);
+    }
     const apiSpecContent = await fs.readFile(API_SPEC_PATH, 'utf-8');
     const apiDocs = yaml.load(apiSpecContent) as Record<string, unknown>;
     server.use('/api-docs', swaggerUi.serve, swaggerUi.setup(apiDocs));
