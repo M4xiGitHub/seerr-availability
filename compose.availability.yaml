@@ -19,7 +19,10 @@ services:
       AVAILABILITY_INTERVAL_MS: '600000'
       AVAILABILITY_HOURLY_LIMIT: '6'
       AVAILABILITY_AUTO_CHECK: 'false'
+      AVAILABILITY_BUILDER: 'true'
+      AVAILABILITY_POSITIVE_TTL_HOURS: '24'
       PROWLARR_URL: http://seerr-availability-indexers:9696
+      PROWLARR_SHARED_STATUS_URL: http://prowlarr_server_1:9696
     volumes:
       - lab-config:/app/config
     networks:

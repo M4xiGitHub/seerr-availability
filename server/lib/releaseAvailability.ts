@@ -31,6 +31,15 @@ type Entry = {
   reason?: string;
   item?: Title & Record<string, unknown>;
 };
+type BuilderState = { page: number; lastFetchAt: number; nextFetchAt: number; added: number; error?: string };
+
+export function movieCandidates(results: Record<string, any>[], now = Date.now()): Title[] {
+  const cutoff = new Date(now - 45 * 86400000).toISOString().slice(0, 10);
+  return results.filter(i => Number.isInteger(i.id) && i.id > 0 && i.title && !i.adult && i.release_date && i.release_date <= cutoff)
+    .sort((a, b) => Number(['en', 'de'].includes(b.original_language)) - Number(['en', 'de'].includes(a.original_language)))
+    .map(i => ({ id: i.id, mediaType: 'movie', title: i.title, originalTitle: i.original_title || i.title, originalLanguage: i.original_language, releaseDate: i.release_date,
+      posterPath: i.poster_path, backdropPath: i.backdrop_path, overview: i.overview, genreIds: i.genre_ids ?? [], popularity: i.popularity, voteAverage: i.vote_average, voteCount: i.vote_count, adult: false, video: false }));
+}
 
 const normalize = (s: string) => s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -80,6 +89,10 @@ export class Availability {
   private candidates = new Map<string, Title>();
   private queryTimes: number[] = [];
   private nextCheckAt = 0;
+  private builderTimer?: ReturnType<typeof setInterval>;
+  private builderBusy = false;
+  private builder: BuilderState = { page: 1, lastFetchAt: 0, nextFetchAt: 0, added: 0 };
+  private stateFile = path.join(process.env.CONFIG_DIRECTORY ?? '/app/config', 'availability-builder.json');
   private budgetFile = path.join(process.env.CONFIG_DIRECTORY ?? '/app/config', 'availability-budget.json');
   private file = path.join(process.env.CONFIG_DIRECTORY ?? '/app/config', 'availability-cache.json');
   private base = process.env.PROWLARR_URL ?? 'http://prowlarr_server_1:9696';
@@ -88,6 +101,50 @@ export class Availability {
     try { this.key ||= JSON.parse(fs.readFileSync(path.join(path.dirname(this.file), 'availability-secrets.json'), 'utf8')).prowlarrApiKey ?? ''; } catch { /* Environment key is also supported. */ }
     try { this.cache = new Map(JSON.parse(fs.readFileSync(this.file, 'utf8'))); } catch { /* First start. */ }
     try { const b = JSON.parse(fs.readFileSync(this.budgetFile, 'utf8')); this.queryTimes = b.queryTimes ?? []; this.nextCheckAt = b.nextCheckAt ?? 0; } catch { /* First start. */ }
+    try { const s = JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); this.builder = { ...this.builder, ...s.builder }; this.pending = new Map(s.pending ?? []); } catch { /* First start. */ }
+  }
+  private saveBuilder() {
+    try { fs.writeFileSync(`${this.stateFile}.tmp`, JSON.stringify({ builder: this.builder, pending: [...this.pending] })); fs.renameSync(`${this.stateFile}.tmp`, this.stateFile); } catch { /* Runtime state remains usable. */ }
+  }
+  startBuilder() {
+    if (process.env.AVAILABILITY_BUILDER !== 'true' || this.builderTimer) return;
+    this.builderTimer = setInterval(() => void this.buildTick(), 60000);
+    this.builderTimer.unref();
+    void this.buildTick();
+    if (this.pending.size) this.schedule(Math.max(1000, this.nextCheckAt - Date.now()));
+  }
+  stopBuilder() { if (this.builderTimer) clearInterval(this.builderTimer); this.builderTimer = undefined; }
+  private async discoverCandidates(page: number) {
+    const TheMovieDb = (await import('../api/themoviedb')).default;
+    const data = await new TheMovieDb().getDiscoverMovies({ page, language: 'de', originalLanguage: 'all', sortBy: 'popularity.desc', primaryReleaseDateLte: new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10), voteCountGte: '50' });
+    return { results: movieCandidates(data.results), totalPages: data.total_pages };
+  }
+  async buildTick() {
+    if (this.builderBusy) return;
+    this.builderBusy = true;
+    try {
+      // Renew one expired positive at a time; leave space for new movies.
+      const expired = [...this.cache.entries()].find(([key, e]) => e.state === 'found' && e.expiresAt <= Date.now() && !this.pending.has(key) && this.active !== key);
+      if (expired && this.pending.size < 50) {
+        const [key, entry] = expired;
+        const [mediaType, id] = key.split(':');
+        this.enqueue({ id: Number(id), mediaType, ...(mediaType === 'movie' ? { title: entry.title } : { name: entry.title }), ...entry.item });
+      }
+      if (this.pending.size >= 10 || this.builder.nextFetchAt > Date.now()) return;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const data = await Promise.race([this.discoverCandidates(this.builder.page), new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('Movie candidate lookup timed out')), 12000); })]);
+        let added = 0;
+        for (const item of data.results) {
+          if (this.lookup(item) || this.pending.has(this.keyFor(item)) || this.active === this.keyFor(item)) continue;
+          this.enqueue(item); added++;
+        }
+        this.builder = { page: this.builder.page >= Math.min(500, data.totalPages || 1) ? 1 : this.builder.page + 1, lastFetchAt: Date.now(), nextFetchAt: Date.now() + 15 * 60000, added: this.builder.added + added };
+      } finally { if (timeout) clearTimeout(timeout); }
+    } catch (error) {
+      this.builder.error = error instanceof Error ? error.message : 'Candidate lookup failed';
+      this.builder.nextFetchAt = Date.now() + 15 * 60000;
+    } finally { this.builderBusy = false; this.saveBuilder(); }
   }
   keyFor(item: Title) { return `${item.mediaType}:${item.id}`; }
   lookup(item: Title) {
@@ -161,6 +218,7 @@ export class Availability {
     const key = this.keyFor(item);
     if (this.lookup(item) || this.active === key || this.pending.has(key) || this.pending.size >= 100) return;
     this.pending.set(key, item);
+    this.saveBuilder();
     this.schedule(Math.max(0, this.nextCheckAt - Date.now()));
   }
   private schedule(ms: number) {
@@ -168,8 +226,8 @@ export class Availability {
     this.timer = setTimeout(() => { this.timer = undefined; void this.work(); }, ms);
     this.timer.unref();
   }
-  private async json(endpoint: string) {
-    const response = await fetch(`${this.base}${endpoint}`, {
+  private async json(endpoint: string, base = this.base) {
+    const response = await fetch(`${base}${endpoint}`, {
       headers: { 'X-Api-Key': this.key }, signal: AbortSignal.timeout(15000),
     });
     if (response.status === 429) {
@@ -199,6 +257,15 @@ export class Availability {
     try {
       if (!this.key) throw new Error('Prowlarr key is not configured');
       const [indexers, statuses] = await Promise.all([this.json('/api/v1/indexer'), this.json('/api/v1/indexerstatus')]);
+      // Respect the production instance's backoff too: accounts/quotas are shared.
+      const sharedBase = process.env.PROWLARR_SHARED_STATUS_URL;
+      const shared = sharedBase ? await this.json('/api/v1/indexerstatus', sharedBase) : [];
+      const sharedUntil = Math.max(0, ...shared.map((s: { disabledTill?: string }) => Date.parse(s.disabledTill ?? '') || 0));
+      if (sharedUntil > Date.now()) {
+        this.nextCheckAt = Math.max(this.nextCheckAt, sharedUntil);
+        this.saveBudget();
+        throw new Error('Production indexer is backing off; background checks deferred');
+      }
       const blocked = new Set(statuses.filter((s: { disabledTill?: string }) => Date.parse(s.disabledTill ?? '') > Date.now()).map((s: { indexerId: number }) => s.indexerId));
       const enabled = indexers.filter((i: { enable: boolean; protocol: string }) => i.enable && i.protocol === 'usenet');
       if (!enabled.length || enabled.some((i: { id: number }) => blocked.has(i.id))) throw new Error('One or more Usenet indexers are unavailable/backing off; check deferred');
@@ -213,15 +280,21 @@ export class Availability {
       if (after.some((s: { disabledTill?: string }) => Date.parse(s.disabledTill ?? '') > Date.now())) throw new Error('Indexer failed during search; availability unknown');
       const matches = releases.map(r => matchRelease(item, r)).filter(Boolean) as Entry['matches'];
       matches.sort((a, b) => (Number(b.language === 'German') - Number(a.language === 'German')) || b.quality - a.quality);
-      entry = { state: matches.length ? 'found' : 'missing', title: item.title || item.name || '', checkedAt: now, expiresAt: now + (matches.length ? 6 * 3600000 : 3600000), matches: matches.slice(0, 5) };
+      const positiveHours = Math.max(1, Math.min(24, Number(process.env.AVAILABILITY_POSITIVE_TTL_HOURS ?? 6)));
+      entry = { state: matches.length ? 'found' : 'missing', title: item.title || item.name || '', checkedAt: now, expiresAt: now + (matches.length ? positiveHours * 3600000 : 3600000), matches: matches.slice(0, 5) };
       if (matches.length) entry.item = await this.metadata(item);
     } catch (error) {
       entry = { state: 'error', title: item.title || item.name || '', checkedAt: now, expiresAt: now + 60000, matches: [], reason: error instanceof Error ? error.message : 'Check failed' };
+      this.nextCheckAt = Math.max(this.nextCheckAt, Date.now() + 15 * 60000);
+      this.saveBudget();
+      // Keep failed work for a later retry; do not spend budget walking the queue during an outage.
+      this.pending.set(key, item);
     }
     this.cache.set(key, entry);
     if (this.cache.size > 3000) this.cache.delete(this.cache.keys().next().value!);
     try { fs.writeFileSync(`${this.file}.tmp`, JSON.stringify([...this.cache])); fs.renameSync(`${this.file}.tmp`, this.file); } catch { /* Diagnostics remain available in memory. */ }
     this.active = undefined;
+    this.saveBuilder();
     if (this.pending.size) this.schedule(Math.max(10000, this.nextCheckAt - Date.now()));
   }
   record(req: { method: string; path: string; headers: { [key: string]: unknown } }, counts = {}) {
@@ -230,7 +303,7 @@ export class Availability {
     this.recent.length = Math.min(this.recent.length, 100);
   }
   status() {
-    return { sandbox: true, autoCheck: process.env.AVAILABILITY_AUTO_CHECK === 'true', nextCheckAt: this.nextCheckAt, hourlySearches: this.queryTimes.filter(t => t > Date.now() - 3600000).length, policy: '1080p/2160p; German preferred, English fallback (unmarked English inferred from original language). TV means at least one matching release, not complete seasons.', active: this.active, queued: this.pending.size, searches: this.queries, candidates: [...this.candidates.values()].filter(i => !this.lookup(i)), entries: [...this.cache].map(([key, value]) => ({ key, ...value })), recent: this.recent };
+    return { sandbox: true, builder: { ...this.builder, enabled: process.env.AVAILABILITY_BUILDER === 'true' }, autoCheck: process.env.AVAILABILITY_AUTO_CHECK === 'true', nextCheckAt: this.nextCheckAt, hourlySearches: this.queryTimes.filter(t => t > Date.now() - 3600000).length, policy: '1080p/2160p; German preferred, English fallback (unmarked English inferred from original language). TV means at least one matching release, not complete seasons.', active: this.active, queued: this.pending.size, searches: this.queries, candidates: [...this.candidates.values()].filter(i => !this.lookup(i)), entries: [...this.cache].map(([key, value]) => ({ key, ...value })), recent: this.recent };
   }
   async filter(body: { results: Title[] }, req: Parameters<Availability['record']>[0]) {
     const candidates = body.results.filter(i => ['movie', 'tv'].includes(i.mediaType));

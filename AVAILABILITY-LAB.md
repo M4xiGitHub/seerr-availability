@@ -11,19 +11,21 @@ The branch is `availability-catalogue`. This is a prototype, not an upstream See
 - Sign in using your existing Seerr or Jellyfin account. The lab has its own copied user database and session secret.
 - In Neptune, explicitly select the test URL as the **active Seerr URL**. Merely saving it does not switch the active connection. Switch back to port 5055 to return to normal.
 - Two live-checked series were seeded in the test cache. Searching for `Supernatural` or `South Park` currently demonstrates a positive result. An unchecked title is hidden.
-- Visit a Discover row or search, then open the diagnostics page. Under **Titles encountered while browsing**, explicitly select a title to check. Refresh the catalogue once it finishes.
+- The background builder now discovers released movie candidates automatically. Open the diagnostics page to see its queue, candidate-source error (if any), current check and the number of movies ready. Movies appear as positive checks finish. Explicit title checks remain available.
 
 ## Behaviour and limits
 
 The general Discover trending/popular TV/movie rows now display the checked-title catalogue directly, with correct pagination. They no longer depend on a checked title also appearing on an unrelated TMDB trending page. These replacement rows require the administrator account in this prototype. Other paginated Discover/search results, similar/recommendation lists and collection parts are filtered. Navigation cards remain visible. A title is shown only while its cached check is positive; expired checks are labelled in diagnostics. Existing library availability is not presented as proof of a currently indexed release.
 
-Browsing is **cache-only by default**. It does not search indexers. Live checks require an explicit action in the lab. They are limited to six title searches per hour, ten minutes apart. The budget persists across container restarts. A 429 opens a circuit breaker for at least one hour or the longer Retry-After interval. Indexer failures are `error`/unknown, not `missing`.
+Browsing remains **cache-only** and never searches indexers itself. A separate background builder fetches movie candidates from TMDB, checks them gradually, and renews expired positives. Candidates must have a release date at least 45 days ago and at least 50 TMDB votes; English/German originals are checked first but other original languages are not excluded. This does not prove digital release availability; only a matching indexer result qualifies a movie for display.
+
+The builder fetches at most one candidate page every 15 minutes and only while its pending queue has fewer than ten entries. Candidate-source failures pause it for 15 minutes. Queue and page cursor persist across restarts. Live checks share one persistent budget with manual checks: six title searches per hour, ten minutes apart. They check the regular Prowlarr instance's backoff state before searching with the isolated instance. A 429 opens a circuit breaker for at least one hour or the longer Retry-After interval. Other network/indexer errors retain the failed work for retry and pause checking for at least 15 minutes. Errors stay unknown, never `missing`.
 
 The isolated Prowlarr copy has no applications, download clients or notification integrations. It uses the same external indexer accounts as production, so their quotas are still shared. One title check can contact both indexers and may use more than one upstream API call. The hourly title budget is not a guarantee about external API call totals.
 
 The preview policy accepts 1080p/2160p and prefers German over English. It uses exact normalized title/type/year checks or a matching TMDB identifier. It considers German title/category markers and explicitly labels inferred English. `GERMAN.SUBBED` is not treated as a German audio track. The policy is independent of Sonarr/Radarr's full quality/custom-format scoring and does not inspect actual audio streams, archives or NNTP article completion. TV availability means **at least one suitable release**, not every season/episode. Results are capped by the provider response; a missing result is not exhaustive proof of absence.
 
-Positive checks expire after six hours, negative checks after one hour, and network errors after one minute. Expired entries remain hidden until explicitly rechecked. The main checked catalogue has accurate pagination. Other filtered genre/search lists retain upstream candidate pagination, so those pages can still be sparse/empty. Positive checks cache metadata, with a four-second metadata deadline and a text-only card fallback. The test Seerr container uses explicit DNS, like its isolated Prowlarr.
+This deployment keeps positive checks for 24 hours, negative checks for one hour, and error diagnostics for one minute. Expired positives are hidden and queued for renewal by the builder. The main checked catalogue has accurate pagination. Other filtered genre/search lists retain upstream candidate pagination, so those pages can still be sparse/empty. Positive checks cache metadata, with a four-second metadata deadline and a text-only card fallback. Candidate metadata remains on cards if enrichment times out. The test Seerr container uses explicit DNS and the copied Seerr setting `network.forceIpv4First=true` to avoid IPv6 connection timeouts. Production Seerr settings are unchanged.
 
 ## Isolation
 
@@ -52,7 +54,7 @@ docker compose -f compose.availability.yaml stop
 
 ## Verification
 
-- 16 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown, checked-catalogue pagination independent of trending, cached genre filtering and preventing genre discovery from falling through to the live API.
+- 20 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown, checked-catalogue pagination, cached genre filtering, released candidate eligibility, queue/cursor recovery, metadata outage cooldown and respecting production backoff without a search.
 - New TypeScript module checked with strict TypeScript 5.4.5 and Express/Node types.
 - Live test searches returned actual releases for the two seeded series.
 - Authenticated HTTP checks confirmed cached positives survive filtering; unchecked results are removed; browsing generated zero searches; POST `/api/v1/request` returned 403.

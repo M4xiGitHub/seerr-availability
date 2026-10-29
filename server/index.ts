@@ -20,7 +20,7 @@ import WebPushAgent from '@server/lib/notifications/agents/webpush';
 import checkOverseerrMerge from '@server/lib/overseerrMerge';
 import { getSettings } from '@server/lib/settings';
 import { Permission } from '@server/lib/permissions';
-import { availabilityCatalogue, availabilityMiddleware, availabilityRouter } from '@server/lib/releaseAvailability';
+import { availability, availabilityCatalogue, availabilityMiddleware, availabilityRouter } from '@server/lib/releaseAvailability';
 import { checkUser, isAuthenticated } from '@server/middleware/auth';
 import logger from '@server/logger';
 import clearCookies from '@server/middleware/clearcookies';
@@ -317,6 +317,7 @@ app
       });
       process.exit(1);
     });
+    if (process.env.AVAILABILITY_SANDBOX === 'true') availability.startBuilder();
   })
   .catch((err) => {
     logger.error(err.stack);
