@@ -29,6 +29,7 @@ type Entry = {
   title: string;
   matches: { title: string; language: string; quality: number; indexer?: string }[];
   reason?: string;
+  item?: Title & Record<string, unknown>;
 };
 
 const normalize = (s: string) => s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
@@ -93,6 +94,34 @@ export class Availability {
     const value = this.cache.get(this.keyFor(item));
     return value && value.expiresAt > Date.now() ? value : undefined;
   }
+  catalogue(mediaType?: string, page = 1) {
+    const entries = [...this.cache.entries()].filter(([key, entry]) => entry.state === 'found' && entry.expiresAt > Date.now() && (!mediaType || key.startsWith(mediaType + ':')));
+    const results = entries.slice((page - 1) * 20, page * 20).map(([key, entry]) => {
+      const [type, id] = key.split(':');
+      return {
+        id: Number(id), mediaType: type, popularity: 0, voteCount: 0, voteAverage: 0,
+        genreIds: [], overview: 'A matching release was found by the availability checker.',
+        originalLanguage: 'en', posterPath: null, backdropPath: null,
+        ...(type === 'tv' ? { name: entry.title, originalName: entry.title, firstAirDate: '', originCountry: [] } : { title: entry.title, originalTitle: entry.title, releaseDate: '', adult: false, video: false }),
+        ...entry.item,
+      };
+    });
+    return { page, totalPages: Math.ceil(entries.length / 20), totalResults: entries.length, results };
+  }
+  private async metadata(item: Title): Promise<Title & Record<string, unknown>> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const lookup = async () => {
+        const TheMovieDb = (await import('../api/themoviedb')).default;
+        const api = new TheMovieDb();
+        const d = item.mediaType === 'tv' ? await api.getTvShow({ tvId: item.id }) : await api.getMovie({ movieId: item.id });
+        const raw = d as unknown as Record<string, any>;
+        return { ...item, overview: raw.overview, posterPath: raw.poster_path, backdropPath: raw.backdrop_path, originalLanguage: raw.original_language, genreIds: (raw.genres ?? []).map((g: { id: number }) => g.id), voteCount: raw.vote_count, voteAverage: raw.vote_average, popularity: raw.popularity, ...(item.mediaType === 'tv' ? { name: raw.name, originalName: raw.original_name, firstAirDate: raw.first_air_date, originCountry: raw.origin_country } : { title: raw.title, originalTitle: raw.original_title, releaseDate: raw.release_date, adult: raw.adult, video: raw.video }) };
+      };
+      return await Promise.race([lookup(), new Promise<Title>(resolve => { timer = setTimeout(() => resolve(item), 4000); })]);
+    } catch { return item; }
+    finally { if (timer) clearTimeout(timer); }
+  }
   enqueue(item: Title) {
     if (!['movie', 'tv'].includes(item.mediaType) || !Number.isInteger(item.id) || item.id <= 0 || !(item.title || item.name)) return;
     const key = this.keyFor(item);
@@ -151,6 +180,7 @@ export class Availability {
       const matches = releases.map(r => matchRelease(item, r)).filter(Boolean) as Entry['matches'];
       matches.sort((a, b) => (Number(b.language === 'German') - Number(a.language === 'German')) || b.quality - a.quality);
       entry = { state: matches.length ? 'found' : 'missing', title: item.title || item.name || '', checkedAt: now, expiresAt: now + (matches.length ? 6 * 3600000 : 3600000), matches: matches.slice(0, 5) };
+      if (matches.length) entry.item = await this.metadata(item);
     } catch (error) {
       entry = { state: 'error', title: item.title || item.name || '', checkedAt: now, expiresAt: now + 60000, matches: [], reason: error instanceof Error ? error.message : 'Check failed' };
     }
@@ -184,6 +214,16 @@ export class Availability {
 }
 
 export const availability = new Availability();
+
+// These general rows represent the checked catalogue, rather than an intersection
+// with an unrelated TMDB trending page. Register behind administrator auth.
+export const availabilityCatalogue: RequestHandler = (req, res, next) => {
+  if (req.method !== 'GET' || !['/trending', '/tv', '/movies'].includes(req.path)) return next();
+  if (Object.keys(req.query).some(key => !['page', 'language'].includes(key))) return next();
+  const page = Math.max(1, Number(req.query.page) || 1);
+  res.setHeader('X-Availability-Filter', 'checked-catalogue');
+  res.json(availability.catalogue(req.path === '/tv' ? 'tv' : req.path === '/movies' ? 'movie' : undefined, page));
+};
 
 export const availabilityMiddleware: RequestHandler = (req, res, next) => {
   if (process.env.AVAILABILITY_SANDBOX !== 'true') return next();

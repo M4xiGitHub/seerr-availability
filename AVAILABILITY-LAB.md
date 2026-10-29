@@ -15,7 +15,7 @@ The branch is `availability-catalogue`. This is a prototype, not an upstream See
 
 ## Behaviour and limits
 
-The server filters paginated Discover/search results, similar/recommendation lists and collection parts. Navigation cards are not media titles and remain visible. A title is shown only while its cached check is positive. Existing library availability is not presented as proof of a currently indexed release.
+The general Discover trending/popular TV/movie rows now display the checked-title catalogue directly, with correct pagination. They no longer depend on a checked title also appearing on an unrelated TMDB trending page. These replacement rows require the administrator account in this prototype. Other paginated Discover/search results, similar/recommendation lists and collection parts are filtered. Navigation cards remain visible. A title is shown only while its cached check is positive; expired checks are labelled in diagnostics. Existing library availability is not presented as proof of a currently indexed release.
 
 Browsing is **cache-only by default**. It does not search indexers. Live checks require an explicit action in the lab. They are limited to six title searches per hour, ten minutes apart. The budget persists across container restarts. A 429 opens a circuit breaker for at least one hour or the longer Retry-After interval. Indexer failures are `error`/unknown, not `missing`.
 
@@ -23,7 +23,7 @@ The isolated Prowlarr copy has no applications, download clients or notification
 
 The preview policy accepts 1080p/2160p and prefers German over English. It uses exact normalized title/type/year checks or a matching TMDB identifier. It considers German title/category markers and explicitly labels inferred English. `GERMAN.SUBBED` is not treated as a German audio track. The policy is independent of Sonarr/Radarr's full quality/custom-format scoring and does not inspect actual audio streams, archives or NNTP article completion. TV availability means **at least one suitable release**, not every season/episode. Results are capped by the provider response; a missing result is not exhaustive proof of absence.
 
-Positive checks expire after six hours, negative checks after one hour, and network errors after one minute. Expired entries remain hidden until explicitly rechecked. Original upstream pagination counts are preserved to let clients continue browsing; pages can therefore be sparse/empty and totals describe the candidate catalogue, not the filtered subset. This needs a dedicated indexing/pagination design before production use.
+Positive checks expire after six hours, negative checks after one hour, and network errors after one minute. Expired entries remain hidden until explicitly rechecked. The main checked catalogue has accurate pagination. Other filtered genre/search lists retain upstream candidate pagination, so those pages can still be sparse/empty. Positive checks cache metadata, with a four-second metadata deadline and a text-only card fallback. The test Seerr container uses explicit DNS, like its isolated Prowlarr.
 
 ## Isolation
 
@@ -52,7 +52,7 @@ docker compose -f compose.availability.yaml stop
 
 ## Verification
 
-- 13 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown.
+- 14 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown, checked-catalogue pagination independent of trending.
 - New TypeScript module checked with strict TypeScript 5.4.5 and Express/Node types.
 - Live test searches returned actual releases for the two seeded series.
 - Authenticated HTTP checks confirmed cached positives survive filtering; unchecked results are removed; browsing generated zero searches; POST `/api/v1/request` returned 403.

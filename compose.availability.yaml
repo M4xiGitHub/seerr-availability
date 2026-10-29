@@ -7,6 +7,9 @@ services:
     image: seerr-availability:local
     container_name: seerr-availability-lab
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - '127.0.0.1:5057:5055'
       - '192.168.0.21:5057:5055'
