@@ -52,11 +52,12 @@ docker compose -f compose.availability.yaml stop
 
 ## Verification
 
-- 14 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown, checked-catalogue pagination independent of trending.
+- 16 Node unit tests: title/type/year/language/quality matching, password/torrent exclusion, cache expiry, cache-only filtering, blocked sandbox writes, 429 cooldown, checked-catalogue pagination independent of trending, cached genre filtering and preventing genre discovery from falling through to the live API.
 - New TypeScript module checked with strict TypeScript 5.4.5 and Express/Node types.
 - Live test searches returned actual releases for the two seeded series.
 - Authenticated HTTP checks confirmed cached positives survive filtering; unchecked results are removed; browsing generated zero searches; POST `/api/v1/request` returned 403.
 - Browser check confirmed the diagnostics page loads and asks for administrator sign-in.
+- Movie/TV discovery now applies genre, original language, date/rating/vote-count filters and sorting to cached metadata. Unknown metadata is excluded when needed for a filter; unsupported filters return no candidates instead of calling live discovery. Verified `/discover/movies?genre=28` renders **No results** instead of a 500 when there are no checked Action movies.
 - Neptune's official documentation says Discover queries use the configured Seerr server. No public Apple TV client source was found in the developer's GitHub repositories; `need4swede/neptune-plugins` is public. On-device compatibility remains to be verified using the lab's client traces.
 
 Sources:

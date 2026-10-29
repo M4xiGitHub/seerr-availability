@@ -94,8 +94,42 @@ export class Availability {
     const value = this.cache.get(this.keyFor(item));
     return value && value.expiresAt > Date.now() ? value : undefined;
   }
-  catalogue(mediaType?: string, page = 1) {
-    const entries = [...this.cache.entries()].filter(([key, entry]) => entry.state === 'found' && entry.expiresAt > Date.now() && (!mediaType || key.startsWith(mediaType + ':')));
+  catalogue(mediaType?: string, page = 1, filters: Record<string, unknown> = {}) {
+    const supported = new Set(['page', 'sortBy', 'genre', 'language', 'primaryReleaseDateGte', 'primaryReleaseDateLte', 'firstAirDateGte', 'firstAirDateLte', 'voteAverageGte', 'voteAverageLte', 'voteCountGte', 'voteCountLte']);
+    const unsupported = Object.keys(filters).some(key => !supported.has(key) && filters[key] !== '' && filters[key] !== undefined);
+    const entries = [...this.cache.entries()].filter(([key, entry]) => {
+      if (unsupported || entry.state !== 'found' || entry.expiresAt <= Date.now() || (mediaType && !key.startsWith(mediaType + ':'))) return false;
+      const item: Record<string, unknown> = entry.item ?? {};
+      if (filters.genre) {
+        const genres = item.genreIds as number[] | undefined;
+        if (!genres?.length) return false;
+        // TMDB uses comma for AND and pipe for OR.
+        const requested = String(filters.genre).split(/[|,]/).map(Number);
+        if (String(filters.genre).includes('|') ? !requested.some(g => genres.includes(g)) : !requested.every(g => genres.includes(g))) return false;
+      }
+      if (filters.language && item.originalLanguage !== filters.language) return false;
+      const date = (key.startsWith('tv:') ? item.firstAirDate : item.releaseDate) as string | undefined;
+      const low = filters.primaryReleaseDateGte || filters.firstAirDateGte;
+      const high = filters.primaryReleaseDateLte || filters.firstAirDateLte;
+      if (low && (!date || date < String(low))) return false;
+      if (high && (!date || date > String(high))) return false;
+      for (const [name, field, minimum] of [['voteAverageGte', 'voteAverage', true], ['voteAverageLte', 'voteAverage', false], ['voteCountGte', 'voteCount', true], ['voteCountLte', 'voteCount', false]] as const) {
+        if (filters[name] !== undefined && filters[name] !== '') {
+          const value = Number(item[field]);
+          if (!Number.isFinite(value) || (minimum ? value < Number(filters[name]) : value > Number(filters[name]))) return false;
+        }
+      }
+      return true;
+    });
+    const [sort, direction] = String(filters.sortBy ?? '').split('.');
+    if (sort) entries.sort(([, a], [, b]) => {
+      const field = ({ original_title: 'title', name: 'name', original_name: 'name', release_date: 'releaseDate', first_air_date: 'firstAirDate', vote_average: 'voteAverage', popularity: 'popularity' } as Record<string, string>)[sort];
+      if (!field) return 0;
+      const left = a.item?.[field] ?? a.title;
+      const right = b.item?.[field] ?? b.title;
+      const comparison = typeof left === 'number' && typeof right === 'number' ? left - right : String(left).localeCompare(String(right));
+      return direction === 'desc' ? -comparison : comparison;
+    });
     const results = entries.slice((page - 1) * 20, page * 20).map(([key, entry]) => {
       const [type, id] = key.split(':');
       return {
@@ -219,10 +253,9 @@ export const availability = new Availability();
 // with an unrelated TMDB trending page. Register behind administrator auth.
 export const availabilityCatalogue: RequestHandler = (req, res, next) => {
   if (req.method !== 'GET' || !['/trending', '/tv', '/movies'].includes(req.path)) return next();
-  if (Object.keys(req.query).some(key => !['page', 'language'].includes(key))) return next();
   const page = Math.max(1, Number(req.query.page) || 1);
   res.setHeader('X-Availability-Filter', 'checked-catalogue');
-  res.json(availability.catalogue(req.path === '/tv' ? 'tv' : req.path === '/movies' ? 'movie' : undefined, page));
+  res.json(availability.catalogue(req.path === '/tv' ? 'tv' : req.path === '/movies' ? 'movie' : undefined, page, req.query));
 };
 
 export const availabilityMiddleware: RequestHandler = (req, res, next) => {
